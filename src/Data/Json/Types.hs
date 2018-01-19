@@ -2,12 +2,12 @@
 
 module Data.Json.Types where
 
-import Data.Map (Map)
-import Data.String (String)
-import Text.Show (Show)
-import Data.Bool (Bool)
-import Data.Eq (Eq)
-import Prelude (Double)
+import           Data.Bool   (Bool)
+import           Data.Eq     (Eq)
+import           Data.Map    (Map)
+import           Data.String (String)
+import           Prelude     (Double)
+import           Text.Show   (Show)
 
 -- RFC7159-ish JSON
 data JSON =
