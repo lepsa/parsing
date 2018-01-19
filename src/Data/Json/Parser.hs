@@ -1,43 +1,41 @@
 {-# LANGUAGE NoImplicitPrelude #-}
+{-# LANGUAGE ApplicativeDo     #-}
 
 module Data.Json.Parser where
 
 import Data.Json.Types
 import qualified Data.Map as Map
 import Text.Parsing.Char.Parser
-import Text.Parsing.Char.Types
 
-import Control.Applicative ((<*>), (*>), (<*), pure, optional)
+import Control.Applicative ((<*>), (*>), (<*), pure, optional, (<|>))
 import Data.Function (($), (.), const, flip)
 import Data.Functor ((<$>))
-import Data.Char (Char, chr, digitToInt, isHexDigit, isSpace)
+import Data.Char (Char, chr, digitToInt, isHexDigit)
 import Data.Bool (Bool (True, False), (||))
 import Data.Eq ((==))
 import Data.Int (Int)
-import Data.Set (Set, fromList, member)
 import Data.Maybe (Maybe (Nothing, Just), fromMaybe, isJust)
 import Prelude (Double, Num, (*), (+), (/), (**), (^))
-import Data.List ((++), elem, notElem)
-import Data.List.NonEmpty (NonEmpty ((:|)))
+import Data.List (elem, notElem)
 import Data.String (String)
 import Data.Foldable (foldl, toList)
 
-null :: Parser JSON
+null :: Parsing m => m JSON
 null = const JNull <$> string "null"
 
-true :: Parser JSON
+true :: Parsing m => m JSON
 true = const (JBool True) <$> string "true"
 
-false :: Parser JSON
+false :: Parsing m => m JSON
 false = const (JBool False) <$> string "false"
 
-bool :: Parser JSON
+bool :: Parsing m => m JSON
 bool = true <|> false
 
-integral :: Parser Double
+integral :: Parsing m => m Double
 integral = foldl (\z a -> z * 10 + a) 0 <$> some digit
 
-floating :: Parser Double
+floating :: Parsing m => m Double
 floating = do
   i <- integral
   _ <- char '.'
@@ -50,7 +48,7 @@ floating = do
     zipWithDivisor' _ [] = []
     zipWithDivisor' i (a:as) = (i, a) : zipWithDivisor' (i + 10) as
 
-digit :: Num a => Parser a
+digit :: Num a => Parsing m => m a
 digit = (const 0 <$> satisfy (== '0'))
     <|> (const 1 <$> satisfy (== '1'))
     <|> (const 2 <$> satisfy (== '2'))
@@ -62,16 +60,16 @@ digit = (const 0 <$> satisfy (== '0'))
     <|> (const 8 <$> satisfy (== '8'))
     <|> (const 9 <$> satisfy (== '9'))
 
-minus :: Parser Sign
+minus :: Parsing m => m Sign
 minus = const Minus <$> char '-'
 
-plus :: Parser Sign
+plus :: Parsing m => m Sign
 plus = const Plus  <$> char '+'
 
-sign :: Parser Sign
+sign :: Parsing m => m Sign
 sign = minus <|> plus
 
-number :: Parser JSON
+number :: Parsing m => m JSON
 number = buildNumber <$> neg <*> num <*> exp
   where
     -- Number building
@@ -91,25 +89,25 @@ number = buildNumber <$> neg <*> num <*> exp
     num = floating <|> integral
     exp = optional $ satisfy (\c -> c == 'e' || c == 'E') *> ((,) <$> optional sign <*> integral)
 
-quote :: Parser Char
+quote :: Parsing m => m Char
 quote = char '"'
 
-escape :: Parser Char
+escape :: Parsing m => m Char
 escape = char '\\'
 
 escapeCharacters :: [Char]
 escapeCharacters = ['"', '\\', '/', '\b', '\f', '\n', '\r', '\t']
 
-escaped :: Parser Char
+escaped :: Parsing m => m Char
 escaped = escape *> (hex <|> satisfy (flip elem escapeCharacters))
 
-unescaped :: Parser Char
+unescaped :: Parsing m => m Char
 unescaped = satisfy (flip notElem escapeCharacters)
 
-character :: Parser Char
+character :: Parsing m => m Char
 character = unescaped <|> escaped
 
-hex :: Parser Char
+hex :: Parsing m => m Char
 hex = char 'u' *> hexes
   where
     -- Pull out 4 hex digits, convert into a number, lookup the code point.
@@ -119,7 +117,7 @@ hex = char 'u' *> hexes
     b16 i o = i * (16 ^ o)
     f h1 h2 h3 h4 = chr $ b16 h1 3 + b16 h2 2 + b16 h3 1 + b16 h4 0
 
-jString :: Parser JSON
+jString :: Parsing m => m JSON
 jString = quote *> (JString <$> many character) <* quote
 
 
@@ -127,41 +125,30 @@ jString = quote *> (JString <$> many character) <* quote
 -- Closer to the gramar of JSON
 --
 
-whitespace :: Parser ()
+whitespace :: Parsing m => m ()
 whitespace = const () <$> (many . satisfy $ flip elem [' ', '\t', '\n', '\r'])
 
-array :: Parser JSON
-array = do
-  _ <- beginArray
-  l <- delimited valueSeparator value
-  _ <- endArray
-  pure $ JArray l
+array :: Parsing m => m JSON
+array = JArray <$> (beginArray *> delimited valueSeparator value <* endArray)
 
-object :: Parser JSON
-object = do
-  _ <- beginObject
-  l <- delimited valueSeparator keyValue
-  _ <- endObject
-  pure . JObject $ Map.fromList l
+keyValue :: Parsing m => m (String, JSON)
+keyValue = (,) <$> s <* nameSeparator <*> value
   where
-    keyValue :: Parser (String, JSON)
-    keyValue = do
-      k <- (\(JString s) -> s) <$> jString
-      _ <- nameSeparator
-      v <- value
-      pure (k, v)
+    s = (\(JString s') -> s') <$> jString
 
-value, json :: Parser JSON
+object :: Parsing m => m JSON
+object = JObject . Map.fromList <$> (beginObject *> delimited valueSeparator keyValue <* endObject)
+
+value :: Parsing m => m JSON
 value = object <|> array <|> number <|> jString <|> bool <|> null
-json  = whitespace *> value <* whitespace <* eof
 
-beginArray, endArray, beginObject, endObject, nameSeparator, valueSeparator :: Parser ()
+json :: Parsing m => m JSON
+json = whitespace *> value <* whitespace <* eof
+
+beginArray, endArray, beginObject, endObject, nameSeparator, valueSeparator :: Parsing m => m ()
 beginArray     = const () <$> wrapped whitespace (char '[')
 endArray       = const () <$> wrapped whitespace (char ']')
 beginObject    = const () <$> wrapped whitespace (char '{')
 endObject      = const () <$> wrapped whitespace (char '}')
 nameSeparator  = const () <$> wrapped whitespace (char ':')
 valueSeparator = const () <$> wrapped whitespace (char ',')
-
-
-(<|>) = try
