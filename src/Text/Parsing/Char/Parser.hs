@@ -3,7 +3,7 @@
 
 module Text.Parsing.Char.Parser 
   ( module Text.Parsing.Char.Parser
-  , many
+  , module Control.Applicative
   ) where
 
 import Text.Parsing.Char.Types
@@ -24,7 +24,7 @@ class Alternative m => Parsing m where
   peek          :: m Char
   lookAhead     :: m a -> m a
   notFollowedBy :: m a -> m ()
-  
+ 
   satisfy' :: (Char -> Bool) -> m ()
   satisfy' f = const () <$> satisfy f
 
@@ -71,11 +71,32 @@ instance Parsing Parser' where
       then Success c 1 cs
       else Failure (UnexpectedCharacter c) 1
 
+  -- I need to do something similar to trifecta where
+  -- if my parser consumes input it will not backtrack.
+  --
+  -- runParser' bool "false" -- currently fails when it shouldn't.
+  -- runParser' bool "tru"   -- should fail at position 3 with EOF
+  -- runParser' bool "falst" -- should fail at position 5 with UnexpectedCharacter 't'
+  string s = case s of
+    []    -> pure []
+    (c:_) -> f c *> string' s
+    where
+      string' []     = pure []
+      string' (c:cs) = (:) <$> char c <*> string' cs
+      -- Check if we need to parse through the string, or if it is skipable.
+      f c = Parser' $ \s' -> case s' of
+        []     -> Failure EOF 0
+        (c':_) -> if c == c'
+          then Success () 0 s'
+          else Failure Empty 0
+
   peek = Parser' $ \s -> case s of
     []    -> Failure EOF 0
     (c:_) -> Success c 0 s
     
-  lookAhead p = Parser' $ \s -> f $ runParser' p s
+  lookAhead p = Parser' $ \s -> case s of
+    [] -> Failure EOF 0
+    _  -> f $ runParser' p s
     where
       f (Failure e o)   = Failure e o
       f (Success a _ s) = Success a 0 s

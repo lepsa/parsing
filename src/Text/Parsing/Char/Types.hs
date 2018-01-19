@@ -117,6 +117,7 @@ instance Applicative Parser' where
 
 instance Alternative Parser' where
   empty   = Parser' $ \_ -> Failure Empty 0
+  -- Only backtrack on Empty errors
   a <|> b = Parser' $ \s -> case runParser' a s of
-    (Failure _ _)     -> runParser' b s
-    r@(Success _ _ _) -> r
+    (Failure Empty _) -> runParser' b s
+    r                 -> r
