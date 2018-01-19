@@ -1,5 +1,7 @@
 {-# LANGUAGE ApplicativeDo #-}
 {-# LANGUAGE NoImplicitPrelude #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE FunctionalDependencies #-}
 
 module Text.Parsing.Char.Parser 
   ( module Text.Parsing.Char.Parser
@@ -18,12 +20,13 @@ import Data.Functor ((<$>))
 import Control.Monad.Error.Class (throwError)
 import Data.List.NonEmpty (NonEmpty ((:|)))
 
-class Alternative m => Parsing m where
+class Alternative m => Parsing e m | m -> e where
   eof           :: m ()
   satisfy       :: (Char -> Bool) -> m Char
   peek          :: m Char
   lookAhead     :: m a -> m a
   notFollowedBy :: m a -> m ()
+  error         :: e -> m a
  
   satisfy' :: (Char -> Bool) -> m ()
   satisfy' f = const () <$> satisfy f
@@ -51,8 +54,6 @@ class Alternative m => Parsing m where
   spaces = const () <$> some (satisfy isSpace)
   
   -- 0 or more elements with the unit between them
-  -- 
-  -- Try to parse out the empty list / a single element / a single element : many $ by s *> p
   delimited :: m () -> m a -> m [a]
   delimited s p = emptyList <|> list
     where
@@ -61,6 +62,8 @@ class Alternative m => Parsing m where
 
 
 instance Parsing Parser' where
+  error e = Parser' . const $ Failure e 0
+
   eof = Parser' $ \s -> case s of
     []    -> Success () 0 []
     (c:_) -> Failure (UnexpectedCharacter c) 1
@@ -107,6 +110,8 @@ instance Parsing Parser' where
       f _ (Success _ o _) = Failure UnexpectedValue o
 
 instance Parsing Parser where
+  error = Parser . const . throwError
+
   eof = Parser $ \s ->
     case s of
       []    -> pure ([], ())

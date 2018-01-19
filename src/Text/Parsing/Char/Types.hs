@@ -14,6 +14,7 @@ import Data.List.NonEmpty ()
 import Control.Monad.Except ()
 import Control.Monad.Error.Class (throwError, catchError)
 import Text.Show (Show)
+import Data.Maybe (Maybe)
 import Data.Eq (Eq)
 import Data.Functor (Functor, fmap, (<$>))
 import Data.String (String)
@@ -24,7 +25,8 @@ import Data.Semigroup (Semigroup, (<>))
 import Prelude (Int, (+))
 
 data ParseError = EOF -- Ran out of input
-                | UnexpectedCharacter Char -- Incorrect character
+                | Foo -- ???
+                | UnexpectedCharacter Char
                 | UnexpectedValue -- Incorrect lookahead. Should be UnexpectedValue a
                 | Empty -- The empty error for Alternative.
   deriving (Show, Eq)
@@ -102,7 +104,12 @@ makeLenses ''ParseResult
 
 newtype Parser' a = Parser' {
   runParser' :: String -> ParseResult a
-} deriving (Functor)
+}
+
+instance Functor Parser' where
+  fmap f p = Parser' $ \s -> case runParser' p s of
+    (Failure e o)   -> Failure e o
+    (Success a o r) -> Success (f a) o r
 
 addOffset :: Int -> Parser' a -> Parser' a
 addOffset n p = Parser' $ \s -> case runParser' p s of
@@ -117,7 +124,6 @@ instance Applicative Parser' where
 
 instance Alternative Parser' where
   empty   = Parser' $ \_ -> Failure Empty 0
-  -- Only backtrack on Empty errors
-  a <|> b = Parser' $ \s -> case runParser' a s of
-    (Failure Empty _) -> runParser' b s
-    r                 -> r
+  p <|> q = Parser' $ \s -> case runParser' p s of
+    (Failure _ _) -> runParser' q s
+    r             -> r

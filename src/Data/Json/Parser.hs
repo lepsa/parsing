@@ -11,14 +11,15 @@ import Control.Applicative ((<*>), (*>), (<*), pure, optional, (<|>))
 import Data.Function (($), (.), const, flip)
 import Data.Functor ((<$>))
 import Data.Char (Char, chr, digitToInt, isHexDigit)
-import Data.Bool (Bool (True, False), (||))
+import Data.Bool (Bool (True, False), (||), (&&))
 import Data.Eq ((==))
 import Data.Int (Int)
 import Data.Maybe (Maybe (Nothing, Just), fromMaybe, isJust)
-import Prelude (Double, Num, (*), (+), (/), (**), (^))
+import Prelude (Double, Num, (*), (+), (/), (**), (^), fromInteger, toInteger)
 import Data.List (elem, notElem)
 import Data.String (String)
 import Data.Foldable (foldl, toList)
+import Data.Ord
 
 null :: Parsing m => m JSON
 null = const JNull <$> string "null"
@@ -49,6 +50,8 @@ floating = do
     zipWithDivisor' i (a:as) = (i, a) : zipWithDivisor' (i + 10) as
 
 digit :: Num a => Parsing m => m a
+digit = fromInteger . toInteger . digitToInt <$> satisfy (\c -> '0' <= c && c <= '9')
+{-
 digit = (const 0 <$> satisfy (== '0'))
     <|> (const 1 <$> satisfy (== '1'))
     <|> (const 2 <$> satisfy (== '2'))
@@ -59,6 +62,7 @@ digit = (const 0 <$> satisfy (== '0'))
     <|> (const 7 <$> satisfy (== '7'))
     <|> (const 8 <$> satisfy (== '8'))
     <|> (const 9 <$> satisfy (== '9'))
+-}
 
 minus :: Parsing m => m Sign
 minus = const Minus <$> char '-'
