@@ -8,7 +8,7 @@ module Text.Parsing.Types where
 import           Control.Applicative       (Alternative, Applicative, empty,
                                             liftA2, pure, (<*>), (<|>), (*>))
 import           Control.Lens.TH           (makeLenses)
-import           Control.Monad             (Monad, (>>=))
+import           Control.Monad             (Monad, (>>=), ap)
 import           Data.Char                 (Char)
 import           Data.Either               (Either (Left), either)
 import           Data.Eq                   (Eq ((==)))
@@ -23,7 +23,6 @@ import Text.Parsing (Parsing (..))
 import Text.Parsing.Char (CharParsing (..))
 
 data ParseError = EOF -- Ran out of input
-                | Foo -- ???
                 | UnexpectedCharacter Char
                 | UnexpectedValue -- Incorrect lookahead. Should be UnexpectedValue a
                 | Empty -- The empty error for Alternative.
@@ -114,88 +113,76 @@ instance Monoid (ParserAlt a) where
 
 --
 -- Fancier parsing type
+-- Non-backtracking parser based on trifecta.
+-- You may have noticed the names.
 --
 
-data ParseResult a =
-  Failure { _failureError  :: ParseError
-          , _failureOffset :: Int
-          } |
-  Success { _successResult :: a
-          , _successOffset :: Int
-          , _successRest   :: String
-          }
-  deriving (Functor, Show)
-makeLenses ''ParseResult
+data ParseResult a = EpsilonSuccess   String a
+                   | EpsilonFailure   ParseError
+                   | CommittedSuccess String String a
+                   | CommittedFailure String ParseError
+  deriving (Show)
 
-newtype Parser' a = Parser' {
-  runParser' :: String -> ParseResult a
-}
+instance Functor ParseResult where
+  fmap f (EpsilonSuccess s' a)     = EpsilonSuccess s' $ f a
+  fmap f (CommittedSuccess s s' a) = CommittedSuccess s s' $ f a
+  fmap _ (EpsilonFailure e)        = EpsilonFailure e
+  fmap _ (CommittedFailure s e)    = CommittedFailure s e
+
+newtype Parser' a = Parser' { runParser' :: String -> ParseResult a }
 
 instance Functor Parser' where
-  fmap f p = Parser' $ \s -> case runParser' p s of
-    (Failure e o)   -> Failure e o
-    (Success a o r) -> Success (f a) o r
-
-addOffset :: Int -> Parser' a -> Parser' a
-addOffset n p = Parser' $ \s -> case runParser' p s of
-  (Failure e o)   -> Failure e (o + n)
-  (Success a o r) -> Success a (o + n) r
+  fmap f p = Parser' $ \s -> f <$> runParser' p s
 
 instance Applicative Parser' where
-  pure a = Parser' $ \s -> Success { _successResult = a, _successOffset = 0, _successRest = s }
-  pF <*> pA = Parser' $ \s -> case runParser' pF s of
-    (Failure e o)    -> Failure e o
-    (Success f o s') -> runParser' (f <$> addOffset o pA) s'
+  pure a = Parser' $ \s -> EpsilonSuccess s a
+  (<*>) = ap
 
 instance Alternative Parser' where
-  empty   = Parser' $ \_ -> Failure Empty 0
-  p <|> q = Parser' $ \s -> case runParser' p s of
-    (Failure _ _) -> runParser' q s
-    r             -> r
+  empty = Parser' . const $ EpsilonFailure Empty
+  a <|> b = Parser' $ \s -> case runParser' a s of
+    (EpsilonFailure _) -> runParser' b s
+    r                  -> r
+
+instance Monad Parser' where
+  p >>= f = Parser' $ \i -> case runParser' p i of
+    (EpsilonFailure e)        -> EpsilonFailure e
+    (CommittedFailure s e)    -> CommittedFailure s e
+    (EpsilonSuccess s' a)     -> runToCommitted "" s' a
+    (CommittedSuccess s s' a) -> runToCommitted s s' a
+    where
+      runToCommitted s s' a = epsilonToCommitted s $ runParser' (f a) s'
+
+committedToEpsilon :: ParseResult a -> ParseResult a
+committedToEpsilon (CommittedFailure _ e)    = EpsilonFailure e
+committedToEpsilon (CommittedSuccess _ s' a) = EpsilonSuccess s' a
+committedToEpsilon r                         = r
+
+epsilonToCommitted :: String -> ParseResult a -> ParseResult a
+epsilonToCommitted s (EpsilonFailure e)    = CommittedFailure s e
+epsilonToCommitted s (EpsilonSuccess s' a) = CommittedSuccess s s' a
+epsilonToCommitted s (CommittedFailure s' e) = CommittedFailure (s <> s') e
+epsilonToCommitted s (CommittedSuccess s' s'' a) = CommittedSuccess (s <> s') s'' a
 
 instance Parsing Parser' where
-  eof = Parser' $ \s -> case s of
-    []    -> Success () 0 []
-    (c:_) -> Failure (UnexpectedCharacter c) 1
+  eof = Parser' $ \s -> EpsilonSuccess s ()
+  lookAhead p = Parser' $ \s -> case runParser' p s of
+    (CommittedSuccess _ _ a) -> EpsilonSuccess s a
+    (EpsilonSuccess _ a)     -> EpsilonSuccess s a
+    r                        -> committedToEpsilon r
 
-  lookAhead p = Parser' $ \s -> case s of
-    [] -> Failure EOF 0
-    _  -> f $ runParser' p s
-    where
-      f (Failure e o)   = Failure e o
-      f (Success a _ s) = Success a 0 s
-
-  notFollowedBy p = Parser' $ \s -> f s $ runParser' p s
-    where
-      f s (Failure _ _)   = Success () 0 s
-      f _ (Success _ o _) = Failure UnexpectedValue o
+  notFollowedBy p = Parser' $ \s -> case runParser' p s of
+    (CommittedSuccess _ _ _) -> EpsilonFailure UnexpectedValue
+    (EpsilonSuccess _ _)     -> EpsilonFailure UnexpectedValue
+    _                        -> EpsilonSuccess s ()
 
 instance CharParsing Parser' where
-  -- I need to do something similar to trifecta where
-  -- if my parser consumes input it will not backtrack.
-  --
-  -- runParser' bool "false" -- currently fails when it shouldn't.
-  -- runParser' bool "tru"   -- should fail at position 3 with EOF
-  -- runParser' bool "falst" -- should fail at position 5 with UnexpectedCharacter 't'
-  string s = case s of
-    []    -> pure []
-    (c:_) -> f c *> string' s
-    where
-      string' []     = pure []
-      string' (c:cs) = (:) <$> char c <*> string' cs
-      -- Check if we need to parse through the string, or if it is skipable.
-      f c = Parser' $ \s' -> case s' of
-        []     -> Failure EOF 0
-        (c':_) -> if c == c'
-          then Success () 0 s'
-          else Failure Empty 0
+  satisfy f = Parser' $ \s -> case s of
+    ""     -> EpsilonFailure EOF
+    (c:cs) -> if f c
+      then CommittedSuccess [c] cs c
+      else EpsilonFailure $ UnexpectedCharacter c
 
   peek = Parser' $ \s -> case s of
-    []    -> Failure EOF 0
-    (c:_) -> Success c 0 s
-  
-  satisfy f = Parser' $ \s -> case s of
-    []     -> Failure EOF 0
-    (c:cs) -> if f c
-      then Success c 1 cs
-      else Failure (UnexpectedCharacter c) 1
+    ""    -> EpsilonFailure EOF
+    (c:_) -> EpsilonSuccess s c
