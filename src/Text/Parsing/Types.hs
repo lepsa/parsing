@@ -2,25 +2,33 @@
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE NoImplicitPrelude          #-}
 {-# LANGUAGE TemplateHaskell            #-}
+{-# LANGUAGE MultiParamTypeClasses      #-}
+{-# LANGUAGE FlexibleInstances          #-}
+{-# LANGUAGE RankNTypes                 #-}
+{-# LANGUAGE TypeFamilies               #-}
 
 module Text.Parsing.Types where
 
-import           Control.Applicative       (Alternative, Applicative, empty,
-                                            liftA2, pure, (<*>), (<|>), (*>))
-import           Control.Lens.TH           (makeLenses)
-import           Control.Monad             (Monad, (>>=), ap)
-import           Data.Char                 (Char)
-import           Data.Either               (Either (Left), either)
-import           Data.Eq                   (Eq ((==)))
-import           Data.Function             (const, ($), (.), id)
-import           Data.Functor              (Functor, fmap, (<$>))
-import           Data.Monoid               (Monoid, mappend, mempty)
-import           Data.Semigroup            (Semigroup, (<>))
-import           Data.String               (String)
-import           Prelude                   (Int, (+))
-import           Text.Show                 (Show)
-import Text.Parsing (Parsing (..))
-import Text.Parsing.Char (CharParsing (..))
+import           Control.Applicative        (Alternative, Applicative, empty,
+                                             liftA2, pure, (<*>), (<|>))
+import           Control.Monad              (Monad, (>>=), ap)
+import           Data.Char                  (Char)
+import           Data.Either                (Either (Left), either)
+import           Data.Eq                    (Eq)
+import           Data.Function              (const, ($), (.), id)
+import           Data.Functor               (Functor, fmap, (<$>))
+import           Data.Maybe                 (Maybe, maybe)
+import qualified Data.List                  as List
+import           Data.Monoid                (Monoid, mappend, mempty)
+import           Data.Semigroup             (Semigroup, (<>))
+import           Data.String                (String)
+import           Text.Parsing               (Parsing (..))
+import           Text.Parsing.Char          (CharParsing (..))
+import           Text.Show                  (Show)
+import qualified Data.Text                  as T
+import qualified Data.Text.Lazy             as TL
+import qualified Data.ByteString.Char8      as BS
+import qualified Data.ByteString.Lazy.Char8 as BSL
 
 data ParseError = EOF -- Ran out of input
                 | UnexpectedCharacter Char
@@ -42,11 +50,14 @@ instance Applicative Parser where
     let f = \(s', a) -> fmap a <$> runParser pA s'
     in either Left f $ runParser pF s
 
+-- If the first parser fails, run the second.
 instance Alternative Parser where
   empty = Parser . const $ Left Empty
-  p <|> q = Parser $ \s -> either (const $ runParser q s) (pure . id) $ runParser p s
+  p <|> q = Parser $ \s -> either 
+    (const $ runParser q s)
+    (pure . id)
+    $ runParser p s
 
--- We don't need the Monad instance for this repo, but I'll leave it here just in case.
 instance Monad Parser where
   m >>= f = Parser $ \s ->
     either
@@ -96,9 +107,9 @@ newtype ParserApp a = ParserApp { unParserApp :: Parser a }
 instance Semigroup a => Semigroup (ParserApp a) where
   (<>) = liftA2 (<>)
 
-instance (Semigroup a, Monoid a) => Monoid (ParserApp a) where
+instance Monoid a => Monoid (ParserApp a) where
   mempty = pure mempty
-  mappend = (<>)
+  mappend = liftA2 mappend
 
 -- Keep Conor McBride happy
 newtype ParserAlt a = ParserAlt { unParserAlt :: Parser a }
@@ -117,72 +128,122 @@ instance Monoid (ParserAlt a) where
 -- You may have noticed the names.
 --
 
-data ParseResult a = EpsilonSuccess   String a
-                   | EpsilonFailure   ParseError
-                   | CommittedSuccess String String a
-                   | CommittedFailure String ParseError
-  deriving (Show)
+-- How we will be accessing our streams
+class (Semigroup s, Monoid s) => Cons s c where
+  type ConsValue c :: *
+  type ConsValue c = Char
+  cons   :: c -> s -> s
+  uncons :: s -> Maybe (c, s)
 
-instance Functor ParseResult where
-  fmap f (EpsilonSuccess s' a)     = EpsilonSuccess s' $ f a
-  fmap f (CommittedSuccess s s' a) = CommittedSuccess s s' $ f a
-  fmap _ (EpsilonFailure e)        = EpsilonFailure e
-  fmap _ (CommittedFailure s e)    = CommittedFailure s e
+instance Cons [a] a where
+  type ConsValue a = a
+  cons   = (:)
+  uncons = List.uncons
 
-newtype Parser' a = Parser' { runParser' :: String -> ParseResult a }
+instance Cons T.Text Char where
+  cons   = T.cons
+  uncons = T.uncons
 
-instance Functor Parser' where
+instance Cons TL.Text Char where
+  cons   = TL.cons
+  uncons = TL.uncons
+
+instance Cons BS.ByteString Char where
+  cons   = BS.cons
+  uncons = BS.uncons
+
+instance Cons BSL.ByteString Char where
+  cons   = BSL.cons
+  uncons = BSL.uncons
+
+data ParseResult s a = EpsilonSuccess s a -- String is what remains
+                     | EpsilonFailure  ParseError
+                     -- The fields are what we have consumed so far,
+                     -- what remains to parse,
+                     -- and the result
+                     | CommittedSuccess s s a
+                     -- String is what we have consumed so far
+                     | CommittedFailure s ParseError
+  deriving (Functor, Show)
+
+newtype Parser' s c a = Parser' { runParser' :: Cons s c => s -> ParseResult s a }
+
+instance Functor (Parser' s c) where
   fmap f p = Parser' $ \s -> f <$> runParser' p s
 
-instance Applicative Parser' where
+instance Cons s c => Applicative (Parser' s c) where
   pure a = Parser' $ \s -> EpsilonSuccess s a
   (<*>) = ap
 
-instance Alternative Parser' where
+instance Cons s c => Alternative (Parser' s c) where
   empty = Parser' . const $ EpsilonFailure Empty
   a <|> b = Parser' $ \s -> case runParser' a s of
     (EpsilonFailure _) -> runParser' b s
     r                  -> r
 
-instance Monad Parser' where
+instance Cons s c => Monad (Parser' s c) where
   p >>= f = Parser' $ \i -> case runParser' p i of
     (EpsilonFailure e)        -> EpsilonFailure e
     (CommittedFailure s e)    -> CommittedFailure s e
-    (EpsilonSuccess s' a)     -> runToCommitted "" s' a
+    (EpsilonSuccess s' a)     -> runToCommitted mempty s' a
     (CommittedSuccess s s' a) -> runToCommitted s s' a
     where
       runToCommitted s s' a = epsilonToCommitted s $ runParser' (f a) s'
 
-committedToEpsilon :: ParseResult a -> ParseResult a
+-- Keep Conal Elliot happy
+newtype ParserApp' s c a = ParserApp' { unParserApp' :: Parser' s c a }
+  deriving (Functor, Applicative, Alternative, Monad)
+
+instance (Cons s c, Semigroup a) => Semigroup (ParserApp' s c a) where
+  (<>) = liftA2 (<>)
+
+instance (Cons s c, Monoid a) => Monoid (ParserApp' s c a) where
+  mappend = liftA2 mappend
+  mempty = pure mempty
+
+-- Keep Conor McBride happy
+newtype ParserAlt' s c a = ParserAlt' { unParserAlt' :: Parser' s c a }
+  deriving (Functor, Applicative, Alternative, Monad)
+
+instance Cons s c => Semigroup (ParserAlt' s c a) where
+  (<>) = (<|>)
+
+instance Cons s c => Monoid (ParserAlt' s c a) where
+  mempty = empty
+  mappend = (<>)
+
+committedToEpsilon :: ParseResult s a -> ParseResult s a
 committedToEpsilon (CommittedFailure _ e)    = EpsilonFailure e
 committedToEpsilon (CommittedSuccess _ s' a) = EpsilonSuccess s' a
 committedToEpsilon r                         = r
 
-epsilonToCommitted :: String -> ParseResult a -> ParseResult a
-epsilonToCommitted s (EpsilonFailure e)    = CommittedFailure s e
-epsilonToCommitted s (EpsilonSuccess s' a) = CommittedSuccess s s' a
-epsilonToCommitted s (CommittedFailure s' e) = CommittedFailure (s <> s') e
+epsilonToCommitted :: Semigroup s => s -> ParseResult s a -> ParseResult s a
+epsilonToCommitted s (EpsilonFailure e)          = CommittedFailure s e
+epsilonToCommitted s (EpsilonSuccess s' a)       = CommittedSuccess s s' a
+epsilonToCommitted s (CommittedFailure s' e)     = CommittedFailure (s <> s') e
 epsilonToCommitted s (CommittedSuccess s' s'' a) = CommittedSuccess (s <> s') s'' a
 
-instance Parsing Parser' where
+instance Cons s c => Parsing (Parser' s c) where
   eof = Parser' $ \s -> EpsilonSuccess s ()
   lookAhead p = Parser' $ \s -> case runParser' p s of
     (CommittedSuccess _ _ a) -> EpsilonSuccess s a
     (EpsilonSuccess _ a)     -> EpsilonSuccess s a
-    r                        -> committedToEpsilon r
+    (CommittedFailure _ e)   -> EpsilonFailure e
+    (EpsilonFailure e)       -> EpsilonFailure e
 
   notFollowedBy p = Parser' $ \s -> case runParser' p s of
     (CommittedSuccess _ _ _) -> EpsilonFailure UnexpectedValue
     (EpsilonSuccess _ _)     -> EpsilonFailure UnexpectedValue
     _                        -> EpsilonSuccess s ()
 
-instance CharParsing Parser' where
-  satisfy f = Parser' $ \s -> case s of
-    ""     -> EpsilonFailure EOF
-    (c:cs) -> if f c
-      then CommittedSuccess [c] cs c
-      else EpsilonFailure $ UnexpectedCharacter c
+instance (Cons s c, c ~ Char) => CharParsing (Parser' s c) where
+  satisfy f = Parser' $ maybe (EpsilonFailure EOF) g . uncons
+    where
+      g (c, cs) = if f c
+        then CommittedSuccess (cons c mempty) cs c
+        else EpsilonFailure $ UnexpectedCharacter c
 
-  peek = Parser' $ \s -> case s of
-    ""    -> EpsilonFailure EOF
-    (c:_) -> EpsilonSuccess s c
+  peek = Parser' $ \s -> maybe
+    (EpsilonFailure EOF)
+    (\(c, _) -> EpsilonSuccess s c)
+    $ uncons s
