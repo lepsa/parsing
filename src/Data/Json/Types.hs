@@ -10,13 +10,12 @@ import           Prelude     (Double)
 import           Text.Show   (Show)
 
 -- RFC7159-ish JSON
-data JSON =
-    JObject (Map String JSON)
-  | JArray [JSON]
-  | JString String
-  | JNumber Double
-  | JBool Bool
-  | JNull
-  deriving (Show, Eq)
+data JSON = JObject (Map String JSON)
+          | JArray [JSON]
+          | JString String
+          | JNumber Double
+          | JBool Bool
+          | JNull
+          deriving (Show, Eq)
 
 data Sign = Minus | Plus

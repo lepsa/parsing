@@ -10,8 +10,8 @@ import           Text.Parsing
 import           Text.Parsing.Char
 
 import           Control.Applicative (optional, pure, (*>), (<*), (<*>), (<|>))
-import           Data.Bool           (Bool (False, True), (&&), (||))
-import           Data.Char           (Char, chr, digitToInt, isHexDigit)
+import           Data.Bool           (Bool (False, True), (||))
+import           Data.Char           (Char, chr, digitToInt, isHexDigit, isDigit)
 import           Data.Eq             ((==))
 import           Data.Foldable       (foldl, toList)
 import           Data.Function       (const, flip, ($), (.))
@@ -19,19 +19,19 @@ import           Data.Functor        ((<$>))
 import           Data.Int            (Int)
 import           Data.List           (elem, notElem)
 import           Data.Maybe          (Maybe (Just, Nothing), fromMaybe, isJust)
-import           Data.Ord
 import           Data.String         (String)
 import           Prelude             (Double, Num, fromInteger, toInteger, (*),
                                       (**), (+), (/), (^))
+import Data.Json.Internal
 
 null :: CharParsing m => m JSON
-null = const JNull <$> string "null"
+null = const JNull <$> string jNull
 
 true :: CharParsing m => m JSON
-true = const (JBool True) <$> string "true"
+true = const (JBool True) <$> string jTrue
 
 false :: CharParsing m => m JSON
-false = const (JBool False) <$> string "false"
+false = const (JBool False) <$> string jFalse
 
 bool :: CharParsing m => m JSON
 bool = true <|> false
@@ -48,18 +48,19 @@ floating = do
   pure $ i + r
   where
     f z (d, n) = z + (n / d)
-    zipWithDivisor = zipWithDivisor' 10
+    fractionalBase = 10
+    zipWithDivisor = zipWithDivisor' fractionalBase
     zipWithDivisor' _ []     = []
-    zipWithDivisor' i (a:as) = (i, a) : zipWithDivisor' (i + 10) as
+    zipWithDivisor' i (a:as) = (i, a) : zipWithDivisor' (i + fractionalBase) as
 
 digit :: (Num a, CharParsing m) => m a
-digit = fromInteger . toInteger . digitToInt <$> satisfy (\c -> '0' <= c && c <= '9')
+digit = fromInteger . toInteger . digitToInt <$> satisfy isDigit
 
 minus :: CharParsing m => m Sign
 minus = const Minus <$> char '-'
 
 plus :: CharParsing m => m Sign
-plus = const Plus  <$> char '+'
+plus = const Plus <$> char '+'
 
 sign :: CharParsing m => m Sign
 sign = minus <|> plus
@@ -85,22 +86,28 @@ number = buildNumber <$> neg <*> num <*> exp
     exp = optional $ satisfy (\c -> c == 'e' || c == 'E') *> ((,) <$> optional sign <*> integral)
 
 quote :: CharParsing m => m Char
-quote = char '"'
+quote = char quoteChar
 
-escape :: CharParsing m => m Char
-escape = char '\\'
-
-escapeCharacters :: [Char]
-escapeCharacters = ['"', '\\', '/', '\b', '\f', '\n', '\r', '\t']
-
-escaped :: CharParsing m => m Char
-escaped = escape *> (hex <|> satisfy (flip elem escapeCharacters))
+character :: CharParsing m => m Char
+character = escaped <|> satisfy (flip notElem mandatoryEscape)
 
 unescaped :: CharParsing m => m Char
 unescaped = satisfy (flip notElem escapeCharacters)
 
-character :: CharParsing m => m Char
-character = unescaped <|> escaped
+
+escape :: CharParsing m => m Char
+escape = char escapePrefix
+
+escaped :: CharParsing m => m Char
+escaped = escape *> (hex <|> quote <|> foldr (<|>) empty [
+    , char '\\'
+    , char '/'
+    , const '\b' <$> char 'b'
+    , const '\f' <$> char 'f'
+    , const '\n' <$> char 'n'
+    , const '\r' <$> char 'r'
+    , const '\t' <$> char 't'
+   ] 
 
 hex :: CharParsing m => m Char
 hex = char 'u' *> hexes
@@ -141,9 +148,9 @@ json :: CharParsing m => m JSON
 json = whitespace *> value <* whitespace <* eof
 
 beginArray, endArray, beginObject, endObject, nameSeparator, valueSeparator :: CharParsing m => m ()
-beginArray     = const () <$> wrapped whitespace (char '[')
-endArray       = const () <$> wrapped whitespace (char ']')
-beginObject    = const () <$> wrapped whitespace (char '{')
-endObject      = const () <$> wrapped whitespace (char '}')
-nameSeparator  = const () <$> wrapped whitespace (char ':')
-valueSeparator = const () <$> wrapped whitespace (char ',')
+beginArray     = const () <$> wrapped whitespace (char beginArrayChar)
+endArray       = const () <$> wrapped whitespace (char endArrayChar)
+beginObject    = const () <$> wrapped whitespace (char beginObjectChar)
+endObject      = const () <$> wrapped whitespace (char endObjectChar)
+nameSeparator  = const () <$> wrapped whitespace (char nameSeparatorChar)
+valueSeparator = const () <$> wrapped whitespace (char valueSeparatorChar)
